@@ -1,18 +1,16 @@
 name: Report preordini scaduti
 
 on:
-  # Avvio manuale da interfaccia GitHub
   workflow_dispatch:
-  # Avvio automatico (esempio: ogni lunedì alle 7:00 UTC ~ 8:00 italiane)
   schedule:
-    - cron: '0 7 * * 1'
+    - cron: '0 7 * * 1'  # ogni lunedì alle 7:00 UTC
 
 jobs:
   send-preorder-report:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout (non serve davvero ma è standard)
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Scarica report da Wix
@@ -25,7 +23,6 @@ jobs:
 
           echo "expired=$EXPIRED" >> $GITHUB_OUTPUT
 
-          # Metti il report completo in un output multi-linea
           echo "report<<EOF" >> $GITHUB_OUTPUT
           echo "$REPORT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -50,5 +47,4 @@ jobs:
           to: ${{ secrets.MAIL_TO }}
           from: ${{ secrets.MAIL_FROM || secrets.MAIL_USERNAME }}
 
-          content_type: text/plain
           body: ${{ steps.wix.outputs.report }}
