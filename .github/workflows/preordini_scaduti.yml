@@ -1,0 +1,54 @@
+name: Report preordini scaduti
+
+on:
+  # Avvio manuale da interfaccia GitHub
+  workflow_dispatch:
+  # Avvio automatico (esempio: ogni lunedì alle 7:00 UTC ~ 8:00 italiane)
+  schedule:
+    - cron: '0 7 * * 1'
+
+jobs:
+  send-preorder-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (non serve davvero ma è standard)
+        uses: actions/checkout@v4
+
+      - name: Scarica report da Wix
+        id: wix
+        run: |
+          REPORT=$(curl -s https://www.collezionismopertutti.com/_functions/testPreorderScan)
+
+          # Estrai il numero di preordini scaduti dalla riga "Preordini scaduti ancora ordinabili: X"
+          EXPIRED=$(echo "$REPORT" | grep "Preordini scaduti ancora ordinabili" | sed 's/[^0-9]*//g')
+
+          echo "expired=$EXPIRED" >> $GITHUB_OUTPUT
+
+          # Metti il report completo in un output multi-linea
+          echo "report<<EOF" >> $GITHUB_OUTPUT
+          echo "$REPORT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Debug - mostra numero scaduti
+        run: |
+          echo "Preordini scaduti trovati: ${{ steps.wix.outputs.expired }}"
+
+      - name: Invia email solo se ci sono scaduti
+        if: ${{ steps.wix.outputs.expired != '0' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.MAIL_SERVER }}
+          server_port: ${{ secrets.MAIL_PORT }}
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+
+          subject: >-
+            ARTICOLI IN PREORDINE SCADUTI: ${{ steps.wix.outputs.expired }}
+
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.MAIL_FROM || secrets.MAIL_USERNAME }}
+
+          content_type: text/plain
+          body: ${{ steps.wix.outputs.report }}
