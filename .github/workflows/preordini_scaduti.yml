@@ -1,15 +1,56 @@
 name: Lancia job preordini scaduti
 
+# -----------------------------------------------------------------------------
+# COSA FA:
+#   Ogni lunedì alle 07:00 UTC (≈ 08:00/09:00 italiane) chiama la HTTP
+#   function Velo `runPreorderJob` sul sito Wix. La funzione cerca i prodotti
+#   con ribbon "Preorder" la cui data di scadenza nella descrizione è passata,
+#   e manda la lista via mail a collezionismopertutti@gmail.com.
+#
+# PERCHÉ ORA IL JOB FALLISCE RUMOROSAMENTE:
+#   Prima usavamo `curl -s` e basta, che esce con codice 0 anche se Wix
+#   risponde 404 o 500: GitHub Actions metteva sempre il flag verde anche
+#   quando in realtà non era partita nessuna mail. Ora controlliamo lo
+#   status HTTP, stampiamo la response, e facciamo exit 1 se non è 2xx.
+# -----------------------------------------------------------------------------
+
 on:
-  workflow_dispatch:        # puoi avviarlo a mano
+  workflow_dispatch:        # trigger manuale dal tab Actions
   schedule:
-    - cron: '0 7 * * 1'     # ogni lunedì alle 07:00 UTC (~ 08:00 italiane)
+    - cron: '0 7 * * 1'     # ogni lunedì alle 07:00 UTC
 
 jobs:
   call-wix-job:
     runs-on: ubuntu-latest
-
     steps:
       - name: Chiama runPreorderJob su Wix
         run: |
-          curl -s https://www.collezionismopertutti.com/_functions/runPreorderJob
+          set -euo pipefail
+
+          ENDPOINT="https://www.collezionismopertutti.com/_functions/runPreorderJob"
+          echo "→ Chiamata a $ENDPOINT"
+
+          # -sS = silenzioso ma mostra errori di rete
+          # --max-time 180 = al massimo 3 minuti (la query può essere lunga)
+          # -w "%{http_code}" = stampa solo lo status code, salva il body su file
+          http_code=$(curl -sS \
+            --max-time 180 \
+            -H "Accept: application/json" \
+            -o /tmp/body.txt \
+            -w "%{http_code}" \
+            "$ENDPOINT")
+
+          echo "HTTP status: $http_code"
+          echo "----- Response body -----"
+          # cat || true così se il body è vuoto non andiamo in errore
+          cat /tmp/body.txt || true
+          echo
+          echo "-------------------------"
+
+          # Consideriamo successo solo 2xx
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "::error::Wix function ha risposto $http_code (atteso 2xx)"
+            exit 1
+          fi
+
+          echo "✅ Job preordini scaduti completato."
