@@ -1,0 +1,90 @@
+name: Preordini scaduti v2 (auto-esaurito)
+
+# -----------------------------------------------------------------------------
+# COSA FA:
+#   FLUSSO NUOVO, affianca quello vecchio (preordini_scaduti.yml) senza
+#   sostituirlo. Ogni lunedì alle 06:30 UTC — mezz'ora PRIMA del vecchio —
+#   chiama la HTTP function Velo `runPreorderJobV2` sul sito Wix. La funzione cerca i prodotti
+#   con ribbon "Preorder" scaduti, li mette in ESAURITO + spegne il preordine
+#   (solo se sul sito MODALITA = 'APPLICA') e manda il riepilogo via mail.
+#
+# CHIAVE SEGRETA:
+#   La chiamata porta l'header "x-cxt-key" preso dal secret GitHub
+#   PREORDER_JOB_KEY. Deve essere IDENTICO al secret Wix con lo stesso nome.
+#   Senza chiave valida Wix non modifica nulla (manda solo la mail).
+#
+# TEST SU UN SINGOLO PRODOTTO (tab Actions → Run workflow):
+#   - product_id: l'ID Wix del prodotto
+#   - apply: spunta per metterlo DAVVERO in esaurito (altrimenti prova a secco)
+#   In questo caso la mail non parte: il risultato è nel log qui sotto.
+# -----------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_id:
+        description: 'Test: ID di UN solo prodotto (vuoto = giro completo)'
+        required: false
+        default: ''
+      apply:
+        description: 'Test: applica davvero la modifica al prodotto indicato'
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    - cron: '30 6 * * 1'    # ogni lunedì alle 06:30 UTC (il vecchio parte alle 07:00)
+
+jobs:
+  call-wix-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chiama runPreorderJobV2 su Wix
+        env:
+          JOB_KEY: ${{ secrets.PREORDER_JOB_KEY }}
+          PRODUCT_ID: ${{ github.event.inputs.product_id }}
+          APPLY: ${{ github.event.inputs.apply }}
+        run: |
+          set -euo pipefail
+
+          ENDPOINT="https://www.collezionismopertutti.com/_functions/runPreorderJobV2"
+
+          # Accetta solo ID in formato Wix (lettere, numeri, trattini)
+          if [ -n "${PRODUCT_ID:-}" ]; then
+            if ! [[ "$PRODUCT_ID" =~ ^[A-Za-z0-9-]+$ ]]; then
+              echo "::error::product_id non valido"
+              exit 1
+            fi
+            ENDPOINT="$ENDPOINT?only=$PRODUCT_ID"
+            if [ "${APPLY:-false}" = "true" ]; then
+              ENDPOINT="$ENDPOINT&apply=1"
+            fi
+          fi
+          echo "→ Chiamata a $ENDPOINT"
+
+          http_code=$(curl -sS \
+            --max-time 180 \
+            -H "Accept: application/json" \
+            -H "x-cxt-key: ${JOB_KEY:-}" \
+            -o /tmp/body.txt \
+            -w "%{http_code}" \
+            "$ENDPOINT")
+
+          echo "HTTP status: $http_code"
+          echo "----- Response body -----"
+          cat /tmp/body.txt || true
+          echo
+          echo "-------------------------"
+
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "::error::Wix function ha risposto $http_code (atteso 2xx)"
+            exit 1
+          fi
+
+          # Se Wix segnala errori su singoli prodotti, il job diventa rosso
+          # così te ne accorgi anche senza aprire la mail.
+          if grep -q '"erroriCount":[1-9]' /tmp/body.txt; then
+            echo "::error::Alcuni prodotti non sono stati aggiornati (vedi esiti sopra)"
+            exit 1
+          fi
+
+          echo "✅ Job preordini scaduti v2 completato."
