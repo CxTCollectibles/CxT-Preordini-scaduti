@@ -4,14 +4,20 @@ name: Preordini scaduti v2 (auto-esaurito)
 # COSA FA:
 #   FLUSSO NUOVO, affianca quello vecchio (preordini_scaduti.yml) senza
 #   sostituirlo. Ogni lunedì alle 06:30 UTC — mezz'ora PRIMA del vecchio —
-#   chiama la HTTP function Velo `runPreorderJobV2` sul sito Wix. La funzione cerca i prodotti
-#   con ribbon "Preorder" scaduti, li mette in ESAURITO + spegne il preordine
-#   (solo se sul sito MODALITA = 'APPLICA') e manda il riepilogo via mail.
+#   chiama la HTTP function Velo `runPreorderJobV2` sul sito Wix, che mette in
+#   ESAURITO i preordini scaduti (se sul sito MODALITA = 'APPLICA') e manda la
+#   mail di riepilogo.
+#
+# PERCHÉ PIÙ CHIAMATE:
+#   Wix interrompe una HTTP function dopo ~60 secondi (errore 504). Per questo
+#   il sito lavora al massimo 6 prodotti per chiamata e qui richiamiamo la
+#   funzione finché "rimandatiCount" non arriva a 0 (max 10 chiamate).
+#   Nei lunedì con molti preordini scaduti arrivano quindi 2-3 mail v2.
+#   Un 504 isolato viene ritentato una volta dopo 30 secondi.
 #
 # CHIAVE SEGRETA:
-#   La chiamata porta l'header "x-cxt-key" preso dal secret GitHub
-#   PREORDER_JOB_KEY. Deve essere IDENTICO al secret Wix con lo stesso nome.
-#   Senza chiave valida Wix non modifica nulla (manda solo la mail).
+#   Header "x-cxt-key" preso dal secret GitHub PREORDER_JOB_KEY, identico al
+#   secret Wix con lo stesso nome. Senza chiave valida Wix non modifica nulla.
 #
 # TEST SU UN SINGOLO PRODOTTO (tab Actions → Run workflow):
 #   - product_id: l'ID Wix del prodotto
@@ -47,8 +53,9 @@ jobs:
           set -euo pipefail
 
           ENDPOINT="https://www.collezionismopertutti.com/_functions/runPreorderJobV2"
+          MAX_CHIAMATE=10
 
-          # Accetta solo ID in formato Wix (lettere, numeri, trattini)
+          # Test su singolo prodotto: una sola chiamata
           if [ -n "${PRODUCT_ID:-}" ]; then
             if ! [[ "$PRODUCT_ID" =~ ^[A-Za-z0-9-]+$ ]]; then
               echo "::error::product_id non valido"
@@ -58,32 +65,61 @@ jobs:
             if [ "${APPLY:-false}" = "true" ]; then
               ENDPOINT="$ENDPOINT&apply=1"
             fi
+            MAX_CHIAMATE=1
           fi
-          echo "→ Chiamata a $ENDPOINT"
 
-          http_code=$(curl -sS \
-            --max-time 180 \
-            -H "Accept: application/json" \
-            -H "x-cxt-key: ${JOB_KEY:-}" \
-            -o /tmp/body.txt \
-            -w "%{http_code}" \
-            "$ENDPOINT")
+          chiama() {
+            curl -sS \
+              --max-time 180 \
+              -H "Accept: application/json" \
+              -H "x-cxt-key: ${JOB_KEY:-}" \
+              -o /tmp/body.txt \
+              -w "%{http_code}" \
+              "$ENDPOINT"
+          }
 
-          echo "HTTP status: $http_code"
-          echo "----- Response body -----"
-          cat /tmp/body.txt || true
-          echo
-          echo "-------------------------"
+          errori_totali=0
+          rimandati=0
+          for n in $(seq 1 "$MAX_CHIAMATE"); do
+            echo "→ Chiamata $n a $ENDPOINT"
+            http_code=$(chiama || true)
 
-          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-            echo "::error::Wix function ha risposto $http_code (atteso 2xx)"
+            # 504 = Wix ha interrotto la funzione per tempo: riprovo una volta
+            if [ "$http_code" = "504" ]; then
+              echo "⚠️  Wix ha risposto 504 (timeout): riprovo tra 30 secondi"
+              sleep 30
+              http_code=$(chiama || true)
+            fi
+
+            echo "HTTP status: $http_code"
+            echo "----- Response body -----"
+            cat /tmp/body.txt || true
+            echo
+            echo "-------------------------"
+
+            if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+              echo "::error::Wix function ha risposto $http_code (atteso 2xx)"
+              exit 1
+            fi
+
+            errori=$(grep -o '"erroriCount":[0-9]*' /tmp/body.txt | grep -o '[0-9]*$' || echo 0)
+            rimandati=$(grep -o '"rimandatiCount":[0-9]*' /tmp/body.txt | grep -o '[0-9]*$' || echo 0)
+            errori_totali=$((errori_totali + errori))
+            echo "Errori in questa chiamata: $errori · rimandati: $rimandati"
+
+            if [ "$rimandati" = "0" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$rimandati" != "0" ]; then
+            echo "::error::Dopo $MAX_CHIAMATE chiamate restano ancora $rimandati prodotti da lavorare"
             exit 1
           fi
 
-          # Se Wix segnala errori su singoli prodotti, il job diventa rosso
-          # così te ne accorgi anche senza aprire la mail.
-          if grep -q '"erroriCount":[1-9]' /tmp/body.txt; then
-            echo "::error::Alcuni prodotti non sono stati aggiornati (vedi esiti sopra)"
+          if [ "$errori_totali" -gt 0 ]; then
+            echo "::error::$errori_totali prodotti non sono stati aggiornati (vedi esiti sopra)"
             exit 1
           fi
 
