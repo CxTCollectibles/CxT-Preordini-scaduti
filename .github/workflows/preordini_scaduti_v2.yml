@@ -38,7 +38,7 @@ on:
         required: false
         default: false
   schedule:
-    - cron: '30 6 * * 1'    # ogni lunedì alle 06:30 UTC (il vecchio parte alle 07:00)
+    - cron: '30 23 * * 0'   # ogni domenica alle 23:30 UTC (GitHub parte con ore di ritardo: così la mail arriva comunque in mattinata)
 
 jobs:
   call-wix-job:
